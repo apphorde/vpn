@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WireGuard Manager</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Work+Sans:wght@400;600;700&family=Open+Sans:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        .font-heading { font-family: 'Work Sans', sans-serif; }
+        .font-body { font-family: 'Open Sans', sans-serif; }
+    </style>
+</head>
+<body class="h-full bg-background text-foreground font-body">
+    <div class="min-h-full">
+        <!-- Header -->
+        <header class="bg-card shadow-sm border-b border-border">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="flex justify-between items-center py-6">
+                    <div class="flex items-center">
+                        <div class="flex-shrink-0">
+                            <h1 class="text-2xl font-heading font-bold text-foreground">WireGuard Manager</h1>
+                        </div>
+                    </div>
+                    <div class="flex items-center space-x-4">
+                        <button id="darkModeToggle" class="p-2 rounded-md bg-muted hover:bg-accent hover:text-accent-foreground transition-colors">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
+            <!-- Server Configuration Section -->
+            <div class="mb-8">
+                <div class="bg-card rounded-lg shadow border border-border p-6">
+                    <div class="flex items-center justify-between mb-6">
+                        <h2 class="text-xl font-heading font-semibold text-card-foreground">Server Configuration</h2>
+                        <button id="generateServerKeys" class="bg-primary text-primary-foreground px-4 py-2 rounded-md hover:bg-primary/90 transition-colors font-medium">
+                            Generate Keys
+                        </button>
+                    </div>
+
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <div>
+                            <label class="block text-sm font-medium text-card-foreground mb-2">Private Key</label>
+                            <div class="relative">
+                                <input type="text" id="serverPrivateKey" class="w-full px-3 py-2 bg-input border border-border rounded-md font-mono text-sm" placeholder="Click 'Generate Keys' to create server keys" readonly>
+                                <button id="copyServerPrivate" class="absolute right-2 top-2 p-1 text-muted-foreground hover:text-foreground transition-colors">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-card-foreground mb-2">Public Key</label>
+                            <div class="relative">
+                                <input type="text" id="serverPublicKey" class="w-full px-3 py-2 bg-input border border-border rounded-md font-mono text-sm" placeholder="Public key will appear here" readonly>
+                                <button id="copyServerPublic" class="absolute right-2 top-2 p-1 text-muted-foreground hover:text-foreground transition-colors">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-card-foreground mb-2">Listen Port</label>
+                            <input type="number" id="serverPort" class="w-full px-3 py-2 bg-input border border-border rounded-md" value="51820" min="1" max="65535">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-card-foreground mb-2">Interface</label>
+                            <input type="text" id="serverInterface" class="w-full px-3 py-2 bg-input border border-border rounded-md" value="wg0">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-card-foreground mb-2">Server IP</label>
+                            <input type="text" id="serverIP" class="w-full px-3 py-2 bg-input border border-border rounded-md" value="10.0.0.1/24">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Peers Section -->
+            <div class="bg-card rounded-lg shadow border border-border">
+                <div class="p-6 border-b border-border">
+                    <div class="flex items-center justify-between">
+                        <h2 class="text-xl font-heading font-semibold text-card-foreground">Peers</h2>
+                        <button id="addPeer" class="bg-secondary text-secondary-foreground px-4 py-2 rounded-md hover:bg-secondary/90 transition-colors font-medium">
+                            Add Peer
+                        </button>
+                    </div>
+                </div>
+
+                <div id="peersContainer" class="divide-y divide-border">
+                    <!-- Peers will be dynamically added here -->
+                </div>
+
+                <div id="noPeers" class="p-8 text-center text-muted-foreground">
+                    <svg class="mx-auto h-12 w-12 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path>
+                    </svg>
+                    <p class="text-lg font-medium">No peers configured</p>
+                    <p class="mt-1">Add your first peer to get started</p>
+                </div>
+            </div>
+
+            <!-- Configuration Export -->
+            <div class="mt-8 bg-card rounded-lg shadow border border-border p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-lg font-heading font-semibold text-card-foreground">Configuration Export</h3>
+                    <button id="exportConfig" class="bg-muted text-muted-foreground px-4 py-2 rounded-md hover:bg-accent hover:text-accent-foreground transition-colors font-medium">
+                        Export Config
+                    </button>
+                </div>
+                <textarea id="configOutput" class="w-full h-32 px-3 py-2 bg-input border border-border rounded-md font-mono text-sm resize-none" placeholder="Server configuration will appear here..." readonly></textarea>
+            </div>
+        </main>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="fixed top-4 right-4 bg-muted text-muted-foreground px-4 py-2 rounded-md shadow-lg transform translate-x-full transition-transform duration-300 z-50">
+        <span id="toastMessage"></span>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
