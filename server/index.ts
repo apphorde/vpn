@@ -19,7 +19,7 @@ async function load() {
 async function main() {
   const { db, indexPage, app } = await load();
   const server = createServer(function (request, response) {
-    const url = new URL(request.url);
+    const url = new URL(request.url, 'http://localhost');
     const route = `${request.method} ${url.pathname}`;
 
     switch (route) {
