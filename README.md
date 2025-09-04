@@ -1,0 +1,1 @@
+# VPN manager for Wireguard
