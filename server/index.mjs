@@ -23,6 +23,7 @@ async function main() {
     switch (route) {
       case "GET /":
         return response.end(indexPage);
+
       case "GET /index.js":
         return response.end(app);
 
@@ -34,6 +35,10 @@ async function main() {
         response.end();
         return;
     }
+  });
+
+  server.listen(Number(process.env.PORT), function () {
+    console.log("Server started at :" + process.env.PORT);
   });
 }
 

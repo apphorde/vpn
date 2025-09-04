@@ -1,0 +1,11 @@
+{
+  "name": "vpn-wg",
+  "dependencies": {
+    "micro-router": "latest"
+  },
+  "scripts": {
+    "ci": "npm i && npx tsc",
+    "test": "echo true",
+    "start": "node ./server/index.mjs"
+  }
+}
