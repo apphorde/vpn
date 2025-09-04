@@ -1,13 +1,15 @@
 import { readFile } from "fs/promises";
 import { join } from "path";
+import { createServer } from "node:http";
 
 async function load() {
-  const db = process.env.DB_URL;
+  const dbUrl = String(process.env.DB_URL);
   const dataPath = join(process.cwd(), "data");
   const indexPage = await readFile("./client/index.html");
   const app = await readFile("./client/index.js");
+
   return {
-    db: await import(db),
+    db: await import(dbUrl),
     app,
     dataPath,
     indexPage,

@@ -4,8 +4,11 @@
     "micro-router": "latest"
   },
   "scripts": {
-    "ci": "npm i && npx tsc",
+    "ci": "npm i",
     "test": "echo true",
-    "start": "node ./server/index.mjs"
+    "start": "node ./server/index.ts"
+  },
+  "devDependencies": {
+    "@types/node": "latest"
   }
 }
