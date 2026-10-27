@@ -1,11 +1,12 @@
 {
   "name": "vpn-wg",
   "dependencies": {
-    "micro-router": "latest"
+    "micro-router": "latest",
+    "openid-client": "^6.6.4"
   },
   "scripts": {
     "ci": "npm i",
-    "test": "echo true",
+    "test": "node --test",
     "start": "node ./server/index.ts"
   },
   "devDependencies": {
