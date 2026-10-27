@@ -4,6 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>WireGuard Manager</title>
+    <script>
+      const darkModePreference = localStorage.getItem("darkMode");
+      if (
+        darkModePreference === "true" ||
+        (darkModePreference === null && window.matchMedia("(prefers-color-scheme: dark)").matches)
+      ) {
+        document.documentElement.classList.add("dark");
+      }
+    </script>
     <link href="/styles.css" rel="stylesheet" />
   </head>
   <body class="h-full bg-background text-foreground font-body">
@@ -11,13 +20,13 @@
       <!-- Header -->
       <header class="bg-card shadow-sm border-b border-border">
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div class="flex justify-between items-center py-6">
+          <div class="flex flex-col gap-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:py-6">
             <div class="flex items-center">
               <div class="flex-shrink-0">
                 <h1 class="text-2xl font-heading font-bold text-foreground">WireGuard Manager</h1>
               </div>
             </div>
-            <div class="flex items-center space-x-4">
+            <div class="flex w-full items-center justify-between space-x-4 sm:w-auto sm:justify-start">
               <a href="/protected" class="text-sm underline">Protected area</a>
               <button
                 id="darkModeToggle"
@@ -196,7 +205,7 @@
     <!-- Toast Notification -->
     <div
       id="toast"
-      class="fixed top-4 right-4 bg-muted text-muted-foreground px-4 py-2 rounded-md shadow-lg transform translate-x-full transition-transform duration-300 z-50"
+      class="fixed top-4 right-4 bg-muted text-muted-foreground px-4 py-2 rounded-md shadow-lg transform toast-hidden transition-transform duration-300 z-50"
     >
       <span id="toastMessage"></span>
     </div>

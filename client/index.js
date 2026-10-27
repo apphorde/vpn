@@ -338,10 +338,10 @@ AllowedIPs = ${peer.allowedIPs}
     const toastMessage = document.getElementById("toastMessage");
 
     toastMessage.textContent = message;
-    toast.classList.remove("translate-x-full");
+    toast.classList.remove("toast-hidden");
 
     setTimeout(() => {
-      toast.classList.add("translate-x-full");
+      toast.classList.add("toast-hidden");
     }, 3000);
   }
 
@@ -353,8 +353,3 @@ AllowedIPs = ${peer.allowedIPs}
 
 // Initialize the application
 window.wgManager = new WireGuardManager();
-
-// Load dark mode preference
-if (localStorage.getItem("darkMode") === "true") {
-  document.documentElement.classList.add("dark");
-}
