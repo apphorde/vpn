@@ -6,10 +6,12 @@
   },
   "scripts": {
     "ci": "npm i",
-    "test": "node --test",
+    "build:css": "tailwindcss --config ./tailwind.config.cjs --input ./client/tailwind.input.css --output ./client/styles.css --minify",
+    "test": "npm run build:css && node --test",
     "start": "node ./server/index.ts"
   },
   "devDependencies": {
-    "@types/node": "latest"
+    "@types/node": "latest",
+    "tailwindcss": "3.4.17"
   }
 }

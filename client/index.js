@@ -14,30 +14,18 @@ class WireGuardManager {
 
   bindEvents() {
     // Server key generation
-    document
-      .getElementById("generateServerKeys")
-      .addEventListener("click", () => {
-        this.generateServerKeys();
-      });
+    document.getElementById("generateServerKeys").addEventListener("click", () => {
+      this.generateServerKeys();
+    });
 
     // Copy buttons
-    document
-      .getElementById("copyServerPrivate")
-      .addEventListener("click", () => {
-        this.copyToClipboard(
-          document.getElementById("serverPrivateKey").value,
-          "Server private key copied!"
-        );
-      });
+    document.getElementById("copyServerPrivate").addEventListener("click", () => {
+      this.copyToClipboard(document.getElementById("serverPrivateKey").value, "Server private key copied!");
+    });
 
-    document
-      .getElementById("copyServerPublic")
-      .addEventListener("click", () => {
-        this.copyToClipboard(
-          document.getElementById("serverPublicKey").value,
-          "Server public key copied!"
-        );
-      });
+    document.getElementById("copyServerPublic").addEventListener("click", () => {
+      this.copyToClipboard(document.getElementById("serverPublicKey").value, "Server public key copied!");
+    });
 
     // Add peer
     document.getElementById("addPeer").addEventListener("click", () => {
@@ -63,33 +51,17 @@ class WireGuardManager {
   }
 
   generateServerKeys() {
-    // Simulate key generation (in real implementation, use proper crypto library)
-    const privateKey = this.generateRandomKey();
-    const publicKey = this.derivePublicKey(privateKey);
-
-    this.serverKeys = { private: privateKey, public: publicKey };
-
-    document.getElementById("serverPrivateKey").value = privateKey;
-    document.getElementById("serverPublicKey").value = publicKey;
-
-    this.updateConfigOutput();
-    this.showToast("Server keys generated successfully!");
-  }
-
-  generateRandomKey() {
-    // Simulate WireGuard key generation (44 characters, base64)
-    const chars =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let result = "";
-    for (let i = 0; i < 43; i++) {
-      result += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return result + "=";
-  }
-
-  derivePublicKey(privateKey) {
-    // Simulate public key derivation (in real implementation, use proper crypto)
-    return this.generateRandomKey();
+    this.requestKeyPair()
+      .then(({ privateKey, publicKey }) => {
+        this.serverKeys = { private: privateKey, public: publicKey };
+        document.getElementById("serverPrivateKey").value = privateKey;
+        document.getElementById("serverPublicKey").value = publicKey;
+        this.updateConfigOutput();
+        this.showToast("Server keys generated successfully!");
+      })
+      .catch(() => {
+        this.showToast("Key generation failed. Please sign in again and retry.");
+      });
   }
 
   addPeer() {
@@ -116,15 +88,43 @@ class WireGuardManager {
     this.showToast("Peer removed successfully!");
   }
 
-  generatePeerKeys(peerId) {
+  async generatePeerKeys(peerId) {
     const peer = this.peers.find((p) => p.id === peerId);
-    if (peer) {
-      peer.privateKey = this.generateRandomKey();
-      peer.publicKey = this.derivePublicKey(peer.privateKey);
+    if (!peer) {
+      return;
+    }
+
+    try {
+      const keys = await this.requestKeyPair();
+      peer.privateKey = keys.privateKey;
+      peer.publicKey = keys.publicKey;
       this.updatePeersDisplay();
       this.updateConfigOutput();
       this.showToast("Peer keys generated successfully!");
+    } catch {
+      this.showToast("Key generation failed. Please sign in again and retry.");
     }
+  }
+
+  async requestKeyPair() {
+    const response = await fetch("/api/keys", {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+    });
+    if (response.status === 401) {
+      window.location.assign("/auth/login");
+      throw new Error("Authentication required");
+    }
+    if (!response.ok) {
+      throw new Error("Key generation failed");
+    }
+
+    const keys = await response.json();
+    const wireGuardKey = /^[A-Za-z0-9+/]{43}=$/;
+    if (!wireGuardKey.test(keys.privateKey) || !wireGuardKey.test(keys.publicKey)) {
+      throw new Error("Invalid key response");
+    }
+    return keys;
   }
 
   updatePeer(peerId, field, value) {
@@ -146,14 +146,7 @@ class WireGuardManager {
     }
 
     noPeers.style.display = "none";
-    container.innerHTML = this.peers
-      .map((peer) => this.renderPeer(peer))
-      .join("");
-
-    // Bind events for peer controls
-    this.peers.forEach((peer) => {
-      this.bindPeerEvents(peer.id);
-    });
+    container.innerHTML = this.peers.map((peer) => this.renderPeer(peer)).join("");
   }
 
   renderPeer(peer) {
@@ -163,13 +156,9 @@ class WireGuardManager {
                     <div class="flex items-center space-x-3">
                         <input type="text" value="${peer.name}"
                                class="text-lg font-heading font-semibold bg-transparent border-none p-0 focus:outline-none focus:ring-2 focus:ring-ring rounded"
-                               onchange="wgManager.updatePeer(${
-                                 peer.id
-                               }, 'name', this.value)">
+                               onchange="wgManager.updatePeer(${peer.id}, 'name', this.value)">
                         <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                          peer.enabled
-                            ? "bg-muted text-muted-foreground"
-                            : "bg-destructive/10 text-destructive"
+                          peer.enabled ? "bg-muted text-muted-foreground" : "bg-destructive/10 text-destructive"
                         }">
                             ${peer.enabled ? "Active" : "Disabled"}
                         </span>
@@ -205,12 +194,8 @@ class WireGuardManager {
                             <input type="text" value="${peer.privateKey}"
                                    class="w-full px-3 py-2 bg-input border border-border rounded-md font-mono text-sm"
                                    placeholder="Generate keys to create private key"
-                                   onchange="wgManager.updatePeer(${
-                                     peer.id
-                                   }, 'privateKey', this.value)">
-                            <button onclick="wgManager.copyToClipboard('${
-                              peer.privateKey
-                            }', 'Private key copied!')"
+                                   onchange="wgManager.updatePeer(${peer.id}, 'privateKey', this.value)">
+                            <button onclick="wgManager.copyToClipboard('${peer.privateKey}', 'Private key copied!')"
                                     class="absolute right-2 top-2 p-1 text-muted-foreground hover:text-foreground transition-colors">
                                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
@@ -225,9 +210,7 @@ class WireGuardManager {
                             <input type="text" value="${peer.publicKey}"
                                    class="w-full px-3 py-2 bg-input border border-border rounded-md font-mono text-sm"
                                    placeholder="Public key will appear here" readonly>
-                            <button onclick="wgManager.copyToClipboard('${
-                              peer.publicKey
-                            }', 'Public key copied!')"
+                            <button onclick="wgManager.copyToClipboard('${peer.publicKey}', 'Public key copied!')"
                                     class="absolute right-2 top-2 p-1 text-muted-foreground hover:text-foreground transition-colors">
                                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
@@ -242,35 +225,25 @@ class WireGuardManager {
                         <label class="block text-sm font-medium text-card-foreground mb-2">Allowed IPs</label>
                         <input type="text" value="${peer.allowedIPs}"
                                class="w-full px-3 py-2 bg-input border border-border rounded-md"
-                               onchange="wgManager.updatePeer(${
-                                 peer.id
-                               }, 'allowedIPs', this.value)">
+                               onchange="wgManager.updatePeer(${peer.id}, 'allowedIPs', this.value)">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-card-foreground mb-2">Endpoint</label>
                         <input type="text" value="${peer.endpoint}"
                                class="w-full px-3 py-2 bg-input border border-border rounded-md"
                                placeholder="server.example.com:51820"
-                               onchange="wgManager.updatePeer(${
-                                 peer.id
-                               }, 'endpoint', this.value)">
+                               onchange="wgManager.updatePeer(${peer.id}, 'endpoint', this.value)">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-card-foreground mb-2">Persistent Keepalive</label>
                         <input type="number" value="${peer.persistentKeepalive}"
                                class="w-full px-3 py-2 bg-input border border-border rounded-md"
                                min="0" max="65535"
-                               onchange="wgManager.updatePeer(${
-                                 peer.id
-                               }, 'persistentKeepalive', parseInt(this.value))">
+                               onchange="wgManager.updatePeer(${peer.id}, 'persistentKeepalive', parseInt(this.value))">
                     </div>
                 </div>
             </div>
         `;
-  }
-
-  bindPeerEvents(peerId) {
-    // Events are bound inline in the HTML for simplicity
   }
 
   togglePeer(peerId) {
@@ -285,7 +258,6 @@ class WireGuardManager {
 
   updateConfigOutput() {
     const serverPort = document.getElementById("serverPort").value;
-    const serverInterface = document.getElementById("serverInterface").value;
     const serverIP = document.getElementById("serverIP").value;
 
     let config = `[Interface]
@@ -328,7 +300,8 @@ AllowedIPs = ${peer.allowedIPs}
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "wg0.conf";
+    const interfaceName = document.getElementById("serverInterface").value.trim();
+    a.download = `${interfaceName.replace(/[^a-zA-Z0-9_.-]/g, "_") || "wg0"}.conf`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -374,15 +347,12 @@ AllowedIPs = ${peer.allowedIPs}
 
   toggleDarkMode() {
     document.documentElement.classList.toggle("dark");
-    localStorage.setItem(
-      "darkMode",
-      document.documentElement.classList.contains("dark")
-    );
+    localStorage.setItem("darkMode", document.documentElement.classList.contains("dark"));
   }
 }
 
 // Initialize the application
-const wgManager = new WireGuardManager();
+window.wgManager = new WireGuardManager();
 
 // Load dark mode preference
 if (localStorage.getItem("darkMode") === "true") {

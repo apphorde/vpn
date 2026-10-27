@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, generateKeyPairSync, randomBytes } from "node:crypto";
 import * as oidc from "openid-client";
 
 const cookieName = "vpn_session";
@@ -54,6 +54,19 @@ function cookie(response, value, maxAge, secure) {
   );
 }
 
+async function readRequestBody(request) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > 4096) {
+      throw new Error("Request body is too large");
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 async function main() {
   const issuer = process.env.OIDC_ISSUER;
   const clientId = process.env.OIDC_CLIENT_ID;
@@ -81,9 +94,17 @@ async function main() {
   });
   const callbackUrl = new URL("/auth/callback", appUrl);
   const secureCookie = appUrl.protocol === "https:";
-  const [indexPage, app] = await Promise.all([readFile("./client/index.html"), readFile("./client/index.js")]);
+  const [indexPage, app, styles] = await Promise.all([
+    readFile("./client/index.html"),
+    readFile("./client/index.js"),
+    readFile("./client/styles.css"),
+  ]);
 
   const server = createServer(async (request, response) => {
+    response.setHeader("X-Content-Type-Options", "nosniff");
+    response.setHeader("X-Frame-Options", "DENY");
+    response.setHeader("Referrer-Policy", "no-referrer");
+    response.setHeader("Cross-Origin-Resource-Policy", "same-origin");
     try {
       const url = new URL(request.url ?? "/", appUrl);
       if (url.origin !== appUrl.origin) {
@@ -100,8 +121,49 @@ async function main() {
           .filter(([name]) => name),
       );
       const session = unseal(cookies[cookieName]);
+      const isAuthRoute =
+        route === "GET /auth/login" || route === "GET /auth/callback" || route === "POST /auth/logout";
+
+      if (!isAuthRoute && !session?.user) {
+        const isApiRequest =
+          url.pathname === "/server" ||
+          url.pathname === "/api" ||
+          url.pathname.startsWith("/api/") ||
+          !["GET", "HEAD"].includes(request.method ?? "GET") ||
+          request.headers.accept?.includes("application/json");
+        if (isApiRequest) {
+          response.writeHead(401, {
+            "Content-Type": "application/json; charset=utf-8",
+            "Cache-Control": "no-store",
+            "WWW-Authenticate": "OIDC",
+          });
+          response.end(JSON.stringify({ error: "unauthorized", login: "/auth/login" }));
+          return;
+        }
+        response.writeHead(302, { Location: "/auth/login", "Cache-Control": "no-store" });
+        response.end();
+        return;
+      }
+
+      const isStateChangingRequest = !["GET", "HEAD", "OPTIONS"].includes(request.method ?? "GET");
+      const requestOrigin = request.headers.origin;
+      const allowsOriginlessLogout = route === "POST /auth/logout" && (!requestOrigin || requestOrigin === "null");
+      if (isStateChangingRequest && requestOrigin !== appUrl.origin && !allowsOriginlessLogout) {
+        response.writeHead(403, {
+          "Content-Type": "text/plain; charset=utf-8",
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+        });
+        response.end("Cross-origin request rejected");
+        return;
+      }
 
       if (route === "GET /auth/login") {
+        if (session?.user) {
+          response.writeHead(303, { Location: "/", "Cache-Control": "no-store" });
+          response.end();
+          return;
+        }
         const state = oidc.randomState();
         const nonce = oidc.randomNonce();
         const verifier = oidc.randomPKCECodeVerifier();
@@ -151,16 +213,46 @@ async function main() {
         const claims = tokens.claims();
         cookie(
           response,
-          seal({ user: claims?.sub ?? "Authenticated user", idToken: tokens.id_token, createdAt: Date.now() }),
+          seal({
+            user: claims?.sub ?? "Authenticated user",
+            idToken: tokens.id_token,
+            csrfToken: randomBytes(32).toString("base64url"),
+            createdAt: Date.now(),
+          }),
           8 * 60 * 60,
           secureCookie,
         );
-        response.writeHead(302, { Location: "/protected", "Cache-Control": "no-store" });
+        response.writeHead(302, { Location: "/", "Cache-Control": "no-store" });
         response.end();
         return;
       }
 
       if (route === "POST /auth/logout") {
+        if (session?.user && session.csrfToken) {
+          const contentType = request.headers["content-type"];
+          if (
+            typeof contentType !== "string" ||
+            contentType.split(";", 1)[0].trim().toLowerCase() !== "application/x-www-form-urlencoded"
+          ) {
+            response.writeHead(415, {
+              "Content-Type": "text/plain; charset=utf-8",
+              "Cache-Control": "no-store",
+              "X-Content-Type-Options": "nosniff",
+            });
+            response.end("Expected a form-encoded logout request");
+            return;
+          }
+          const form = new URLSearchParams(await readRequestBody(request));
+          if (form.get("csrfToken") !== session.csrfToken) {
+            response.writeHead(403, {
+              "Content-Type": "text/plain; charset=utf-8",
+              "Cache-Control": "no-store",
+              "X-Content-Type-Options": "nosniff",
+            });
+            response.end("Invalid logout request");
+            return;
+          }
+        }
         cookie(response, "", 0, secureCookie);
         const endSessionEndpoint = config.serverMetadata().end_session_endpoint;
         const logoutUrl =
@@ -187,23 +279,84 @@ async function main() {
           "Referrer-Policy": "no-referrer",
         });
         response.end(
-          `<main><h1>Protected area</h1><p>Signed in as ${escapeHtml(session.user)}</p><form method="post" action="/auth/logout"><button>Sign out</button></form><p><a href="/">Return to WireGuard Manager</a></p></main>`,
+          `<main><h1>Protected area</h1><p>Signed in as ${escapeHtml(session.user)}</p><form method="post" action="/auth/logout"><input type="hidden" name="csrfToken" value="${escapeHtml(session.csrfToken ?? "")}"><button>Sign out</button></form><p><a href="/">Return to WireGuard Manager</a></p></main>`,
         );
         return;
       }
 
       switch (route) {
         case "GET /":
-          response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+          response.writeHead(200, {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store",
+            "Referrer-Policy": "no-referrer",
+          });
           response.end(indexPage);
           return;
         case "GET /index.js":
-          response.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8" });
+          response.writeHead(200, {
+            "Content-Type": "text/javascript; charset=utf-8",
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+          });
           response.end(app);
           return;
+        case "GET /styles.css":
+          response.writeHead(200, {
+            "Content-Type": "text/css; charset=utf-8",
+            "Cache-Control": "no-store",
+          });
+          response.end(styles);
+          return;
         case "GET /server":
+          response.writeHead(200, {
+            "Content-Type": "text/plain; charset=utf-8",
+            "Cache-Control": "no-store",
+          });
           response.end("OK");
           return;
+        case "POST /api/keys": {
+          if (request.headers.origin !== appUrl.origin) {
+            response.writeHead(403, {
+              "Content-Type": "application/json; charset=utf-8",
+              "Cache-Control": "no-store",
+              "X-Content-Type-Options": "nosniff",
+            });
+            response.end(JSON.stringify({ error: "same_origin_required" }));
+            return;
+          }
+          const contentType = request.headers["content-type"];
+          if (
+            typeof contentType !== "string" ||
+            contentType.split(";", 1)[0].trim().toLowerCase() !== "application/json"
+          ) {
+            response.writeHead(415, {
+              "Content-Type": "application/json; charset=utf-8",
+              "Cache-Control": "no-store",
+              "X-Content-Type-Options": "nosniff",
+            });
+            response.end(JSON.stringify({ error: "content_type_must_be_application_json" }));
+            return;
+          }
+          const { privateKey, publicKey } = generateKeyPairSync("x25519");
+          const privateJwk = privateKey.export({ format: "jwk" });
+          const publicJwk = publicKey.export({ format: "jwk" });
+          response.writeHead(200, {
+            "Content-Type": "application/json; charset=utf-8",
+            "Cache-Control": "no-store, private",
+            Pragma: "no-cache",
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+            "Cross-Origin-Resource-Policy": "same-origin",
+          });
+          response.end(
+            JSON.stringify({
+              privateKey: Buffer.from(privateJwk.d, "base64url").toString("base64"),
+              publicKey: Buffer.from(publicJwk.x, "base64url").toString("base64"),
+            }),
+          );
+          return;
+        }
         default:
           response.writeHead(404);
           response.end();
