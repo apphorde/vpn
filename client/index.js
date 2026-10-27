@@ -3,6 +3,9 @@ class WireGuardManager {
     this.peers = [];
     this.peerCounter = 0;
     this.serverKeys = { private: "", public: "" };
+    this.networkId = "";
+    this.savedNetwork = null;
+    this.dirty = false;
     this.init();
   }
 
@@ -10,346 +13,603 @@ class WireGuardManager {
     this.bindEvents();
     this.updatePeersDisplay();
     this.updateConfigOutput();
+    this.refreshNetworks().catch((error) => this.showToast(error.message));
   }
 
   bindEvents() {
-    // Server key generation
-    document.getElementById("generateServerKeys").addEventListener("click", () => {
-      this.generateServerKeys();
-    });
-
-    // Copy buttons
+    document.getElementById("generateServerKeys").addEventListener("click", () => this.generateServerKeys());
     document.getElementById("copyServerPrivate").addEventListener("click", () => {
-      this.copyToClipboard(document.getElementById("serverPrivateKey").value, "Server private key copied!");
+      this.copyToClipboard(this.serverKeys.private, "Server private key copied!");
     });
-
     document.getElementById("copyServerPublic").addEventListener("click", () => {
-      this.copyToClipboard(document.getElementById("serverPublicKey").value, "Server public key copied!");
+      this.copyToClipboard(this.serverKeys.public, "Server public key copied!");
     });
-
-    // Add peer
-    document.getElementById("addPeer").addEventListener("click", () => {
-      this.addPeer();
+    document.getElementById("addPeer").addEventListener("click", () => this.addPeer());
+    document.getElementById("exportConfig").addEventListener("click", () => this.exportConfiguration());
+    document.getElementById("darkModeToggle").addEventListener("click", () => this.toggleDarkMode());
+    document.getElementById("signOutButton").addEventListener("click", () => {
+      document.getElementById("logoutForm").requestSubmit();
     });
-
-    // Export configuration
-    document.getElementById("exportConfig").addEventListener("click", () => {
-      this.exportConfiguration();
+    document.getElementById("newNetwork").addEventListener("click", () => this.newNetwork());
+    document.getElementById("saveNetwork").addEventListener("click", () => this.saveNetwork());
+    document.getElementById("deleteNetwork").addEventListener("click", () => this.deleteNetwork());
+    document.getElementById("importNetwork").addEventListener("click", () => this.importNetwork());
+    document.getElementById("savedNetworks").addEventListener("change", (event) => {
+      if (event.target.value) {
+        this.loadNetwork(event.target.value).catch((error) => this.showToast(error.message));
+      } else {
+        this.newNetwork();
+      }
     });
-
-    // Dark mode toggle
-    document.getElementById("darkModeToggle").addEventListener("click", () => {
-      this.toggleDarkMode();
+    document.getElementById("peersContainer").addEventListener("click", (event) => this.handlePeerAction(event));
+    document.getElementById("peersContainer").addEventListener("change", (event) => this.handlePeerChange(event));
+    ["serverPort", "serverInterface", "serverIP", "serverEndpoint", "serverDNS"].forEach((id) => {
+      document.getElementById(id).addEventListener("input", () => this.markDirty());
     });
-
-    // Server configuration changes
-    ["serverPort", "serverInterface", "serverIP"].forEach((id) => {
-      document.getElementById(id).addEventListener("input", () => {
-        this.updateConfigOutput();
-      });
-    });
+    document.getElementById("networkName").addEventListener("input", () => this.markDirty());
   }
 
-  generateServerKeys() {
-    this.requestKeyPair()
-      .then(({ privateKey, publicKey }) => {
-        this.serverKeys = { private: privateKey, public: publicKey };
-        document.getElementById("serverPrivateKey").value = privateKey;
-        document.getElementById("serverPublicKey").value = publicKey;
-        this.updateConfigOutput();
-        this.showToast("Server keys generated successfully!");
-      })
-      .catch(() => {
-        this.showToast("Key generation failed. Please sign in again and retry.");
-      });
+  async api(path, options = {}) {
+    const response = await fetch(path, {
+      ...options,
+      headers: {
+        Accept: "application/json",
+        ...(options.body ? { "Content-Type": "application/json" } : {}),
+        ...options.headers,
+      },
+    });
+    if (response.status === 401) {
+      window.location.assign("/");
+      throw new Error("Please sign in to continue.");
+    }
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(result.error || "The request failed.");
+    }
+    return result;
+  }
+
+  async requestKeyPair() {
+    return this.api("/api/keys", { method: "POST", headers: { "Content-Type": "application/json" } });
+  }
+
+  async generateServerKeys() {
+    try {
+      this.serverKeys = await this.requestKeyPair();
+      document.getElementById("serverPrivateKey").value = this.serverKeys.privateKey;
+      document.getElementById("serverPublicKey").value = this.serverKeys.publicKey;
+      this.serverKeys = { private: this.serverKeys.privateKey, public: this.serverKeys.publicKey };
+      this.markDirty();
+      this.showToast("Server keys generated successfully.");
+    } catch (error) {
+      this.showToast(error.message || "Key generation failed. Please sign in again.");
+    }
   }
 
   addPeer() {
-    const peer = {
-      id: ++this.peerCounter,
-      name: `Peer ${this.peerCounter}`,
+    const id = ++this.peerCounter;
+    this.peers.push({
+      id,
+      name: `Peer ${id}`,
+      address: this.nextPeerAddress(),
+      serverAllowedIPs: "",
       privateKey: "",
       publicKey: "",
-      allowedIPs: `10.0.0.${this.peerCounter + 1}/32`,
-      endpoint: "",
+      presharedKey: "",
+      routeMode: "vpn",
+      customAllowedIPs: "",
+      allowedIPs: "",
       persistentKeepalive: 25,
       enabled: true,
-    };
+      config: "",
+    });
+    this.markDirty();
+    this.updatePeersDisplay();
+  }
 
-    this.peers.push(peer);
+  nextPeerAddress() {
+    const serverAddress = document.getElementById("serverIP").value.trim().split(",")[0].trim();
+    const match = serverAddress.match(/^(\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})$/);
+    if (!match) {
+      return "";
+    }
+    const octets = match[1].split(".").map(Number);
+    if (octets.some((octet) => octet > 255) || Number(match[2]) > 32) {
+      return "";
+    }
+    const bits = 32 - Number(match[2]);
+    const mask = bits === 32 ? 0 : (0xffffffff << bits) >>> 0;
+    const serverNumber = octets.reduce((result, octet) => ((result << 8) | octet) >>> 0, 0);
+    const network = serverNumber & mask;
+    const size = 2 ** bits;
+    const used = new Set([
+      serverNumber,
+      ...this.peers.map((peer) => Number(this.ipv4ToInteger(peer.address.split("/")[0]))).filter(Number.isFinite),
+    ]);
+    for (let host = 1; host < size - 1; host += 1) {
+      const candidate = network + host;
+      if (!used.has(candidate >>> 0)) {
+        return `${this.integerToIpv4(candidate)}${"/32"}`;
+      }
+    }
+    return "";
+  }
+
+  ipv4ToInteger(value) {
+    if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(value)) {
+      return NaN;
+    }
+    const octets = value.split(".").map(Number);
+    if (octets.some((octet) => octet > 255)) {
+      return NaN;
+    }
+    return octets.reduce((result, octet) => ((result << 8) | octet) >>> 0, 0);
+  }
+
+  integerToIpv4(value) {
+    return [24, 16, 8, 0].map((shift) => (value >>> shift) & 255).join(".");
+  }
+
+  async generatePeerKeys(peerId) {
+    const peer = this.peers.find((candidate) => candidate.id === peerId);
+    if (!peer) {
+      return;
+    }
+    try {
+      const keys = await this.requestKeyPair();
+      peer.privateKey = keys.privateKey;
+      peer.publicKey = keys.publicKey;
+      this.markDirty();
+      this.updatePeersDisplay();
+      this.showToast("Peer keys generated successfully.");
+    } catch (error) {
+      this.showToast(error.message || "Key generation failed. Please sign in again.");
+    }
+  }
+
+  handlePeerAction(event) {
+    const button = event.target.closest("button[data-action]");
+    if (!button) {
+      return;
+    }
+    const peerId = Number(button.dataset.peerId);
+    switch (button.dataset.action) {
+      case "generate":
+        this.generatePeerKeys(peerId);
+        break;
+      case "toggle":
+        this.togglePeer(peerId);
+        break;
+      case "remove":
+        this.removePeer(peerId);
+        break;
+      case "copy-private": {
+        const peer = this.peers.find((candidate) => candidate.id === peerId);
+        this.copyToClipboard(peer?.privateKey, "Peer private key copied!");
+        break;
+      }
+      case "copy-public": {
+        const peer = this.peers.find((candidate) => candidate.id === peerId);
+        this.copyToClipboard(peer?.publicKey, "Peer public key copied!");
+        break;
+      }
+      case "download":
+        this.downloadPeerConfig(peerId);
+        break;
+      default:
+        break;
+    }
+  }
+
+  handlePeerChange(event) {
+    const input = event.target.closest("[data-field]");
+    if (!input) {
+      return;
+    }
+    const peerId = Number(input.dataset.peerId);
+    const field = input.dataset.field;
+    const value = field === "persistentKeepalive" ? Number(input.value) : input.value;
+    const peer = this.peers.find((candidate) => candidate.id === peerId);
+    if (!peer) {
+      return;
+    }
+    if (field === "address" && (!peer.serverAllowedIPs || peer.serverAllowedIPs === peer.address)) {
+      peer.serverAllowedIPs = value;
+    }
+    peer[field] = value;
+    if (field === "routeMode" && value !== "custom") {
+      peer.customAllowedIPs = "";
+    }
+    this.markDirty();
     this.updatePeersDisplay();
     this.updateConfigOutput();
   }
 
   removePeer(peerId) {
     this.peers = this.peers.filter((peer) => peer.id !== peerId);
+    this.markDirty();
     this.updatePeersDisplay();
     this.updateConfigOutput();
-    this.showToast("Peer removed successfully!");
+    this.showToast("Peer removed.");
   }
 
-  async generatePeerKeys(peerId) {
-    const peer = this.peers.find((p) => p.id === peerId);
-    if (!peer) {
-      return;
-    }
-
-    try {
-      const keys = await this.requestKeyPair();
-      peer.privateKey = keys.privateKey;
-      peer.publicKey = keys.publicKey;
+  togglePeer(peerId) {
+    const peer = this.peers.find((candidate) => candidate.id === peerId);
+    if (peer) {
+      peer.enabled = !peer.enabled;
+      this.markDirty();
       this.updatePeersDisplay();
       this.updateConfigOutput();
-      this.showToast("Peer keys generated successfully!");
-    } catch {
-      this.showToast("Key generation failed. Please sign in again and retry.");
     }
-  }
-
-  async requestKeyPair() {
-    const response = await fetch("/api/keys", {
-      method: "POST",
-      headers: { Accept: "application/json", "Content-Type": "application/json" },
-    });
-    if (response.status === 401) {
-      window.location.assign("/auth/login");
-      throw new Error("Authentication required");
-    }
-    if (!response.ok) {
-      throw new Error("Key generation failed");
-    }
-
-    const keys = await response.json();
-    const wireGuardKey = /^[A-Za-z0-9+/]{43}=$/;
-    if (!wireGuardKey.test(keys.privateKey) || !wireGuardKey.test(keys.publicKey)) {
-      throw new Error("Invalid key response");
-    }
-    return keys;
   }
 
   updatePeer(peerId, field, value) {
-    const peer = this.peers.find((p) => p.id === peerId);
+    const peer = this.peers.find((candidate) => candidate.id === peerId);
     if (peer) {
       peer[field] = value;
+      this.markDirty();
       this.updateConfigOutput();
     }
   }
 
   updatePeersDisplay() {
     const container = document.getElementById("peersContainer");
-    const noPeers = document.getElementById("noPeers");
-
-    if (this.peers.length === 0) {
-      container.innerHTML = "";
-      noPeers.style.display = "block";
-      return;
-    }
-
-    noPeers.style.display = "none";
+    document.getElementById("noPeers").style.display = this.peers.length === 0 ? "block" : "none";
     container.innerHTML = this.peers.map((peer) => this.renderPeer(peer)).join("");
   }
 
   renderPeer(peer) {
-    return `
-            <div class="p-6" data-peer-id="${peer.id}">
-                <div class="flex items-center justify-between mb-4">
-                    <div class="flex items-center space-x-3">
-                        <input type="text" value="${peer.name}"
-                               class="text-lg font-heading font-semibold bg-transparent border-none p-0 focus:outline-none focus:ring-2 focus:ring-ring rounded"
-                               onchange="wgManager.updatePeer(${peer.id}, 'name', this.value)">
-                        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                          peer.enabled ? "bg-muted text-muted-foreground" : "bg-destructive/10 text-destructive"
-                        }">
-                            ${peer.enabled ? "Active" : "Disabled"}
-                        </span>
-                    </div>
-                    <div class="flex items-center space-x-2">
-                        <button onclick="wgManager.generatePeerKeys(${peer.id})"
-                                class="bg-secondary text-secondary-foreground px-3 py-1 rounded text-sm hover:bg-secondary/90 transition-colors">
-                            Generate Keys
-                        </button>
-                        <button onclick="wgManager.togglePeer(${peer.id})"
-                                class="p-2 text-muted-foreground hover:text-foreground transition-colors">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="${
-                                  peer.enabled
-                                    ? "M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.878 9.878L3 3m6.878 6.878L21 21"
-                                    : "M15 12a3 3 0 11-6 0 3 3 0 016 0z M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
-                                }"></path>
-                            </svg>
-                        </button>
-                        <button onclick="wgManager.removePeer(${peer.id})"
-                                class="p-2 text-destructive hover:text-destructive/80 transition-colors">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
-                            </svg>
-                        </button>
-                    </div>
-                </div>
-
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
-                    <div>
-                        <label class="block text-sm font-medium text-card-foreground mb-2">Private Key</label>
-                        <div class="relative">
-                            <input type="text" value="${peer.privateKey}"
-                                   class="w-full px-3 py-2 bg-input border border-border rounded-md font-mono text-sm"
-                                   placeholder="Generate keys to create private key"
-                                   onchange="wgManager.updatePeer(${peer.id}, 'privateKey', this.value)">
-                            <button onclick="wgManager.copyToClipboard('${peer.privateKey}', 'Private key copied!')"
-                                    class="absolute right-2 top-2 p-1 text-muted-foreground hover:text-foreground transition-colors">
-                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
-                                </svg>
-                            </button>
-                        </div>
-                    </div>
-
-                    <div>
-                        <label class="block text-sm font-medium text-card-foreground mb-2">Public Key</label>
-                        <div class="relative">
-                            <input type="text" value="${peer.publicKey}"
-                                   class="w-full px-3 py-2 bg-input border border-border rounded-md font-mono text-sm"
-                                   placeholder="Public key will appear here" readonly>
-                            <button onclick="wgManager.copyToClipboard('${peer.publicKey}', 'Public key copied!')"
-                                    class="absolute right-2 top-2 p-1 text-muted-foreground hover:text-foreground transition-colors">
-                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
-                                </svg>
-                            </button>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div>
-                        <label class="block text-sm font-medium text-card-foreground mb-2">Allowed IPs</label>
-                        <input type="text" value="${peer.allowedIPs}"
-                               class="w-full px-3 py-2 bg-input border border-border rounded-md"
-                               onchange="wgManager.updatePeer(${peer.id}, 'allowedIPs', this.value)">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-card-foreground mb-2">Endpoint</label>
-                        <input type="text" value="${peer.endpoint}"
-                               class="w-full px-3 py-2 bg-input border border-border rounded-md"
-                               placeholder="server.example.com:51820"
-                               onchange="wgManager.updatePeer(${peer.id}, 'endpoint', this.value)">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-card-foreground mb-2">Persistent Keepalive</label>
-                        <input type="number" value="${peer.persistentKeepalive}"
-                               class="w-full px-3 py-2 bg-input border border-border rounded-md"
-                               min="0" max="65535"
-                               onchange="wgManager.updatePeer(${peer.id}, 'persistentKeepalive', parseInt(this.value))">
-                    </div>
-                </div>
-            </div>
-        `;
+    const id = Number(peer.id);
+    const name = this.escapeHtml(peer.name);
+    const privateKey = this.escapeHtml(peer.privateKey);
+    const publicKey = this.escapeHtml(peer.publicKey);
+    const presharedKey = this.escapeHtml(peer.presharedKey || "");
+    const address = this.escapeHtml(peer.address);
+    const serverAllowedIPs = this.escapeHtml(peer.serverAllowedIPs || peer.address);
+    const customAllowedIPs = this.escapeHtml(peer.customAllowedIPs || "");
+    const config = this.escapeHtml(peer.config || "Save this network to generate the client config.");
+    return `<article class="p-6" data-peer-id="${id}">
+      <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div class="flex min-w-0 flex-1 items-center gap-3">
+          <input aria-label="Peer name" data-peer-id="${id}" data-field="name" type="text" maxlength="80" value="${name}" class="min-w-0 rounded border border-border bg-input px-2 py-1 text-lg font-semibold">
+          <span class="inline-flex items-center rounded-full bg-muted px-2.5 py-0.5 text-xs font-medium text-muted-foreground">${peer.enabled ? "Active" : "Disabled"}</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-2">
+          <button data-action="generate" data-peer-id="${id}" class="rounded bg-secondary px-3 py-1 text-sm font-medium text-secondary-foreground hover:bg-secondary/90">Generate keys</button>
+          <button data-action="toggle" data-peer-id="${id}" class="rounded bg-muted px-3 py-1 text-sm text-muted-foreground">${peer.enabled ? "Disable" : "Enable"}</button>
+          <button data-action="remove" data-peer-id="${id}" class="rounded px-2 py-1 text-sm text-destructive">Remove</button>
+        </div>
+      </div>
+      <div class="mb-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div>
+          <label class="mb-2 block text-sm font-medium text-card-foreground">Private key</label>
+          <div class="flex gap-2">
+            <input aria-label="${name} private key" type="password" value="${privateKey}" readonly class="min-w-0 flex-1 rounded-md border border-border bg-input px-3 py-2 font-mono text-sm" placeholder="Generate keys">
+            <button data-action="copy-private" data-peer-id="${id}" class="rounded bg-muted px-3 text-sm text-muted-foreground">Copy</button>
+          </div>
+        </div>
+        <div>
+          <label class="mb-2 block text-sm font-medium text-card-foreground">Public key</label>
+          <div class="flex gap-2">
+            <input aria-label="${name} public key" type="text" value="${publicKey}" readonly class="min-w-0 flex-1 rounded-md border border-border bg-input px-3 py-2 font-mono text-sm" placeholder="Generated with the private key">
+            <button data-action="copy-public" data-peer-id="${id}" class="rounded bg-muted px-3 text-sm text-muted-foreground">Copy</button>
+          </div>
+        </div>
+      </div>
+      <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div>
+          <label class="mb-2 block text-sm font-medium text-card-foreground">Client VPN address</label>
+          <input data-peer-id="${id}" data-field="address" type="text" value="${address}" placeholder="10.0.0.2/32, fd42::2/128" class="w-full rounded-md border border-border bg-input px-3 py-2">
+        </div>
+        <div>
+          <label class="mb-2 block text-sm font-medium text-card-foreground">Server peer AllowedIPs</label>
+          <input data-peer-id="${id}" data-field="serverAllowedIPs" type="text" value="${serverAllowedIPs}" class="w-full rounded-md border border-border bg-input px-3 py-2 font-mono text-sm">
+        </div>
+        <div>
+          <label class="mb-2 block text-sm font-medium text-card-foreground">Client routes</label>
+          <select data-peer-id="${id}" data-field="routeMode" class="w-full rounded-md border border-border bg-input px-3 py-2">
+            <option value="full" ${peer.routeMode === "full" ? "selected" : ""}>Route everything via VPN</option>
+            <option value="vpn" ${peer.routeMode === "vpn" ? "selected" : ""}>Route only the VPN subnet</option>
+            <option value="custom" ${peer.routeMode === "custom" ? "selected" : ""}>Custom AllowedIPs</option>
+          </select>
+        </div>
+        <div>
+          <label class="mb-2 block text-sm font-medium text-card-foreground">Persistent keepalive (seconds)</label>
+          <input data-peer-id="${id}" data-field="persistentKeepalive" type="number" min="0" max="65535" value="${Number(peer.persistentKeepalive) || 0}" class="w-full rounded-md border border-border bg-input px-3 py-2">
+        </div>
+      </div>
+      <div class="mt-4">
+        <label class="mb-2 block text-sm font-medium text-card-foreground">Preshared key (optional)</label>
+        <input data-peer-id="${id}" data-field="presharedKey" type="password" value="${presharedKey}" class="w-full rounded-md border border-border bg-input px-3 py-2 font-mono text-sm">
+      </div>
+      ${peer.routeMode === "custom" ? `<div class="mt-4"><label class="mb-2 block text-sm font-medium text-card-foreground">Custom AllowedIPs</label><input data-peer-id="${id}" data-field="customAllowedIPs" type="text" value="${customAllowedIPs}" placeholder="10.0.0.0/24, 192.168.1.0/24" class="w-full rounded-md border border-border bg-input px-3 py-2 font-mono text-sm"></div>` : ""}
+      <details class="mt-5 border-t border-border pt-4">
+        <summary class="cursor-pointer font-medium text-card-foreground">Client config file</summary>
+        <textarea readonly class="mt-3 h-40 w-full rounded-md border border-border bg-input px-3 py-2 font-mono text-xs" aria-label="${name} client config">${config}</textarea>
+        <button data-action="download" data-peer-id="${id}" ${peer.config ? "" : "disabled"} class="mt-2 rounded bg-secondary px-3 py-2 text-sm font-medium text-secondary-foreground disabled:opacity-50">Download client config</button>
+      </details>
+    </article>`;
   }
 
-  togglePeer(peerId) {
-    const peer = this.peers.find((p) => p.id === peerId);
-    if (peer) {
-      peer.enabled = !peer.enabled;
-      this.updatePeersDisplay();
-      this.updateConfigOutput();
-      this.showToast(`Peer ${peer.enabled ? "enabled" : "disabled"}!`);
+  async refreshNetworks(selectedId = this.networkId) {
+    const networks = await this.api("/api/networks");
+    const select = document.getElementById("savedNetworks");
+    select.replaceChildren(new Option("New network", ""));
+    for (const network of networks) {
+      select.add(new Option(network.name, network.id));
+    }
+    select.value = selectedId || "";
+  }
+
+  async loadNetwork(id) {
+    const network = await this.api(`/api/networks/${encodeURIComponent(id)}`);
+    this.applyNetwork(network);
+    this.showToast(`Loaded ${network.name}.`);
+  }
+
+  applyNetwork(network) {
+    this.networkId = network.id;
+    this.savedNetwork = network;
+    this.dirty = false;
+    document.getElementById("networkName").value = network.name;
+    document.getElementById("serverInterface").value = network.server?.interfaceName ?? "wg0";
+    document.getElementById("serverIP").value = network.server?.address ?? "";
+    document.getElementById("serverPort").value = network.server?.listenPort ?? 51820;
+    document.getElementById("serverEndpoint").value = network.server?.endpoint ?? "";
+    document.getElementById("serverDNS").value = network.server?.dns ?? "";
+    this.serverKeys = {
+      private: network.server?.privateKey ?? "",
+      public: network.server?.publicKey ?? "",
+    };
+    document.getElementById("serverPrivateKey").value = this.serverKeys.private;
+    document.getElementById("serverPublicKey").value = this.serverKeys.public;
+    this.peers = (network.peers ?? []).map((peer, index) => ({
+      ...peer,
+      id: index + 1,
+      address: peer.address ?? "",
+      serverAllowedIPs: peer.serverAllowedIPs ?? peer.address ?? "",
+      routeMode: peer.routeMode ?? "custom",
+      customAllowedIPs: peer.customAllowedIPs ?? peer.allowedIPs ?? "",
+      persistentKeepalive: Number(peer.persistentKeepalive ?? 25),
+      enabled: peer.enabled !== false,
+      config: peer.config ?? "",
+    }));
+    this.peerCounter = this.peers.length;
+    document.getElementById("deleteNetwork").disabled = false;
+    document.getElementById("savedNetworks").value = network.id;
+    document.getElementById("configOutput").value = network.serverConfig ?? "";
+    this.updatePeersDisplay();
+    this.refreshNetworks(network.id).catch(() => {});
+  }
+
+  newNetwork() {
+    this.networkId = "";
+    this.savedNetwork = null;
+    this.dirty = false;
+    this.peers = [];
+    this.peerCounter = 0;
+    this.serverKeys = { private: "", public: "" };
+    document.getElementById("networkName").value = "New VPN network";
+    document.getElementById("serverInterface").value = "wg0";
+    document.getElementById("serverIP").value = "10.0.0.1/24";
+    document.getElementById("serverPort").value = "51820";
+    document.getElementById("serverEndpoint").value = "";
+    document.getElementById("serverDNS").value = "";
+    document.getElementById("serverPrivateKey").value = "";
+    document.getElementById("serverPublicKey").value = "";
+    document.getElementById("savedNetworks").value = "";
+    document.getElementById("deleteNetwork").disabled = true;
+    this.updatePeersDisplay();
+    this.updateConfigOutput();
+  }
+
+  async saveNetwork() {
+    if (this.networkId && this.savedNetwork && !this.dirty) {
+      this.showToast("Network is already saved.");
+      return;
+    }
+    try {
+      const payload = this.networkPayload();
+      const path = this.networkId ? `/api/networks/${encodeURIComponent(this.networkId)}` : "/api/networks";
+      const network = await this.api(path, {
+        method: this.networkId ? "PUT" : "POST",
+        body: JSON.stringify(payload),
+      });
+      this.applyNetwork(network);
+      await this.refreshNetworks(network.id);
+      this.showToast("Network validated and saved.");
+    } catch (error) {
+      this.showToast(error.message || "Could not save this network.");
     }
   }
 
-  updateConfigOutput() {
-    const serverPort = document.getElementById("serverPort").value;
-    const serverIP = document.getElementById("serverIP").value;
+  networkPayload() {
+    return {
+      name: document.getElementById("networkName").value,
+      server: {
+        interfaceName: document.getElementById("serverInterface").value,
+        address: document.getElementById("serverIP").value,
+        listenPort: Number(document.getElementById("serverPort").value),
+        endpoint: document.getElementById("serverEndpoint").value,
+        dns: document.getElementById("serverDNS").value,
+        privateKey: this.serverKeys.private,
+        publicKey: this.serverKeys.public,
+      },
+      peers: this.peers.map((peer) => ({
+        name: peer.name,
+        address: peer.address,
+        serverAllowedIPs: peer.serverAllowedIPs || peer.address,
+        privateKey: peer.privateKey,
+        publicKey: peer.publicKey,
+        presharedKey: peer.presharedKey || "",
+        routeMode: peer.routeMode,
+        customAllowedIPs: peer.customAllowedIPs,
+        persistentKeepalive: Number(peer.persistentKeepalive),
+        enabled: peer.enabled,
+      })),
+    };
+  }
 
-    let config = `[Interface]
-Address = ${serverIP}
-PrivateKey = ${this.serverKeys.private || "[Generate server keys first]"}
-ListenPort = ${serverPort}
+  async deleteNetwork() {
+    if (!this.networkId || !window.confirm(`Delete network “${document.getElementById("networkName").value}”?`)) {
+      return;
+    }
+    try {
+      await this.api(`/api/networks/${encodeURIComponent(this.networkId)}`, { method: "DELETE" });
+      this.newNetwork();
+      await this.refreshNetworks("");
+      this.showToast("Network deleted.");
+    } catch (error) {
+      this.showToast(error.message || "Could not delete this network.");
+    }
+  }
 
-`;
-
-    this.peers
-      .filter((peer) => peer.enabled && peer.publicKey)
-      .forEach((peer) => {
-        config += `[Peer]
-# ${peer.name}
-PublicKey = ${peer.publicKey}
-AllowedIPs = ${peer.allowedIPs}
-`;
-        if (peer.endpoint) {
-          config += `Endpoint = ${peer.endpoint}
-`;
-        }
-        if (peer.persistentKeepalive > 0) {
-          config += `PersistentKeepalive = ${peer.persistentKeepalive}
-`;
-        }
-        config += "\n";
+  async importNetwork() {
+    const serverFile = document.getElementById("serverConfigFile").files[0];
+    const clientFiles = Array.from(document.getElementById("clientConfigFiles").files);
+    if (!serverFile) {
+      this.showToast("Choose the server .conf file first.");
+      return;
+    }
+    try {
+      const totalBytes = serverFile.size + clientFiles.reduce((size, file) => size + file.size, 0);
+      if (totalBytes > 450 * 1024) {
+        throw new Error("The selected configs exceed the upload size limit.");
+      }
+      const payload = {
+        name: document.getElementById("networkName").value,
+        serverConfig: await serverFile.text(),
+        peers: await Promise.all(
+          clientFiles.map(async (file, index) => ({
+            name: file.name.replace(/\.conf$/i, "") || `Peer ${index + 1}`,
+            config: await file.text(),
+          })),
+        ),
+      };
+      const validation = await this.api("/api/networks/validate", {
+        method: "POST",
+        body: JSON.stringify(payload),
       });
+      if (!validation.valid) {
+        throw new Error("The WireGuard configs did not validate.");
+      }
+      const network = await this.api("/api/networks/import", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      this.applyNetwork(network);
+      await this.refreshNetworks(network.id);
+      document.getElementById("serverConfigFile").value = "";
+      document.getElementById("clientConfigFiles").value = "";
+      this.showToast("Paired configs validated and imported.");
+    } catch (error) {
+      this.showToast(error.message || "Could not import these configs.");
+    }
+  }
 
+  markDirty() {
+    this.dirty = true;
+    this.savedNetwork = null;
+    for (const peer of this.peers) {
+      peer.config = "";
+    }
+    this.updatePeersDisplay();
+    this.updateConfigOutput();
+  }
+
+  updateConfigOutput() {
+    if (this.savedNetwork && !this.dirty) {
+      document.getElementById("configOutput").value = this.savedNetwork.serverConfig ?? "";
+      return;
+    }
+    const serverIP = document.getElementById("serverIP").value;
+    const privateKey = this.serverKeys.private || "[Generate server keys first]";
+    const serverPort = document.getElementById("serverPort").value;
+    let config = `[Interface]\nAddress = ${serverIP}\nPrivateKey = ${privateKey}\nListenPort = ${serverPort}\n`;
+    for (const peer of this.peers.filter(
+      (candidate) => candidate.enabled && candidate.publicKey && candidate.address,
+    )) {
+      config += `\n[Peer]\nPublicKey = ${peer.publicKey}${peer.presharedKey ? `\nPresharedKey = ${peer.presharedKey}` : ""}\nAllowedIPs = ${peer.serverAllowedIPs || peer.address}\n`;
+    }
     document.getElementById("configOutput").value = config;
+  }
+
+  downloadPeerConfig(peerId) {
+    const peer = this.peers.find((candidate) => candidate.id === peerId);
+    if (!peer?.config) {
+      this.showToast("Save the network to generate its client config.");
+      return;
+    }
+    this.downloadText(peer.config, `${this.fileSlug(peer.name)}.conf`);
   }
 
   exportConfiguration() {
     const config = document.getElementById("configOutput").value;
-    if (!config.trim()) {
-      this.showToast("No configuration to export!");
+    if (!this.savedNetwork || this.dirty) {
+      this.showToast("Save the network to validate it before exporting.");
       return;
     }
-
-    const blob = new Blob([config], { type: "text/plain" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    const interfaceName = document.getElementById("serverInterface").value.trim();
-    a.download = `${interfaceName.replace(/[^a-zA-Z0-9_.-]/g, "_") || "wg0"}.conf`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-
-    this.showToast("Configuration exported successfully!");
+    this.downloadText(config, `${this.fileSlug(document.getElementById("serverInterface").value || "wg0")}.conf`);
   }
 
-  copyToClipboard(text, message) {
+  downloadText(text, filename) {
+    const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  fileSlug(value) {
+    return (
+      value
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, "-")
+        .replace(/^-+|-+$/g, "") || "wireguard"
+    );
+  }
+
+  async copyToClipboard(text, message) {
     if (!text) {
-      this.showToast("Nothing to copy!");
+      this.showToast("Nothing to copy.");
       return;
     }
-
-    navigator.clipboard
-      .writeText(text)
-      .then(() => {
-        this.showToast(message);
-      })
-      .catch(() => {
-        // Fallback for older browsers
-        const textArea = document.createElement("textarea");
-        textArea.value = text;
-        document.body.appendChild(textArea);
-        textArea.select();
-        document.execCommand("copy");
-        document.body.removeChild(textArea);
-        this.showToast(message);
-      });
+    try {
+      await navigator.clipboard.writeText(text);
+      this.showToast(message);
+    } catch {
+      this.showToast("Clipboard access was denied by this browser.");
+    }
   }
 
   showToast(message) {
     const toast = document.getElementById("toast");
-    const toastMessage = document.getElementById("toastMessage");
-
-    toastMessage.textContent = message;
+    document.getElementById("toastMessage").textContent = message;
     toast.classList.remove("toast-hidden");
-
-    setTimeout(() => {
-      toast.classList.add("toast-hidden");
-    }, 3000);
+    setTimeout(() => toast.classList.add("toast-hidden"), 3500);
   }
 
   toggleDarkMode() {
     document.documentElement.classList.toggle("dark");
     localStorage.setItem("darkMode", document.documentElement.classList.contains("dark"));
   }
+
+  escapeHtml(value) {
+    return String(value).replace(
+      /[&<>"']/g,
+      (character) =>
+        ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;",
+        })[character],
+    );
+  }
 }
 
-// Initialize the application
 window.wgManager = new WireGuardManager();

@@ -3,6 +3,9 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { createPrivateKey, createPublicKey, generateKeyPairSync, sign } from "node:crypto";
 import { createServer } from "node:http";
+import { mkdtemp, rm, stat, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { after, before, test } from "node:test";
 
 const issuerKeys = generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -19,6 +22,7 @@ let appProcess;
 let latestNonce;
 let tokenRequest;
 let appStderr = "";
+let networksDirectory;
 
 function sendJson(response, value) {
   response.writeHead(200, { "Content-Type": "application/json" });
@@ -65,6 +69,7 @@ function startApp(port) {
         OIDC_CLIENT_ID: "test-client",
         OIDC_CLIENT_SECRET: "test-client-secret",
         SESSION_SECRET: "test session secret with at least 32 bytes",
+        NETWORKS_DIR: networksDirectory,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -131,6 +136,7 @@ before(async () => {
   issuer = `http://127.0.0.1:${issuerServer.address().port}`;
   const port = await unusedPort();
   appUrl = `http://127.0.0.1:${port}`;
+  networksDirectory = await mkdtemp(join(tmpdir(), "vpn-app-networks-"));
   await startApp(port);
 });
 
@@ -141,6 +147,9 @@ after(async () => {
   }
   if (issuerServer?.listening) {
     await new Promise((resolve, reject) => issuerServer.close((error) => (error ? reject(error) : resolve())));
+  }
+  if (networksDirectory) {
+    await rm(networksDirectory, { recursive: true, force: true });
   }
 });
 
@@ -162,8 +171,15 @@ test("X25519 key derivation matches the RFC 7748 test vector", () => {
 
 test("login validates state, PKCE, and nonce before granting the protected session", async () => {
   const homeResponse = await fetch(`${appUrl}/`, { redirect: "manual" });
-  assert.equal(homeResponse.status, 302);
-  assert.equal(homeResponse.headers.get("location"), "/auth/login");
+  assert.equal(homeResponse.status, 200);
+  assert.equal(homeResponse.headers.get("cache-control"), "no-store");
+  const signInLanding = await homeResponse.text();
+  assert.match(signInLanding, /Sign in to continue/);
+  assert.doesNotMatch(signInLanding, /WireGuard Manager|styles\.css|index\.js|Server Configuration/);
+  assert.match(signInLanding, /href="\/auth\/login"/);
+  assert.match(signInLanding, /display: grid/);
+  assert.match(signInLanding, /place-items: center/);
+  assert.doesNotMatch(signInLanding, /<script|<link/);
 
   const scriptResponse = await fetch(`${appUrl}/index.js`, { redirect: "manual" });
   assert.equal(scriptResponse.status, 302);
@@ -176,10 +192,6 @@ test("login validates state, PKCE, and nonce before granting the protected sessi
   const faviconResponse = await fetch(`${appUrl}/favicon.ico`, { redirect: "manual" });
   assert.equal(faviconResponse.status, 302);
   assert.equal(faviconResponse.headers.get("location"), "/auth/login");
-
-  const protectedResponse = await fetch(`${appUrl}/protected`, { redirect: "manual" });
-  assert.equal(protectedResponse.status, 302);
-  assert.equal(protectedResponse.headers.get("location"), "/auth/login");
 
   const unknownRoute = await fetch(`${appUrl}/unknown`, { redirect: "manual" });
   assert.equal(unknownRoute.status, 302);
@@ -218,6 +230,16 @@ test("login validates state, PKCE, and nonce before granting the protected sessi
 
   const unauthenticatedApiRoot = await fetch(`${appUrl}/api`, { redirect: "manual" });
   assert.equal(unauthenticatedApiRoot.status, 401);
+
+  const unauthenticatedNetworks = await fetch(`${appUrl}/api/networks`, { redirect: "manual" });
+  assert.equal(unauthenticatedNetworks.status, 401);
+
+  const unauthenticatedNetworkCreate = await fetch(`${appUrl}/api/networks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  assert.equal(unauthenticatedNetworkCreate.status, 401);
 
   const loginResponse = await fetch(`${appUrl}/auth/login`, { redirect: "manual" });
   assert.equal(loginResponse.status, 302);
@@ -265,12 +287,16 @@ test("login validates state, PKCE, and nonce before granting the protected sessi
   assert.match(homeHtml, /href="\/styles\.css"/);
   assert.match(homeHtml, /<script src="index\.js"><\/script>/);
   assert.doesNotMatch(homeHtml, /https:\/\/(?:cdn\.tailwindcss\.com|fonts\.googleapis\.com)/);
+  assert.doesNotMatch(homeHtml, /Protected area/);
+  assert.match(homeHtml, /Sign out/);
+  const csrfToken = homeHtml.match(/name="csrfToken" value="([A-Za-z0-9_-]+)"/)?.[1];
+  assert.ok(csrfToken);
 
   const appScript = await fetch(`${appUrl}/index.js`, { headers: { Cookie: session } });
   assert.equal(appScript.status, 200);
   assert.equal(appScript.headers.get("cache-control"), "no-store");
   const appSource = await appScript.text();
-  assert.match(appSource, /fetch\("\/api\/keys"/);
+  assert.match(appSource, /\/api\/keys/);
   assert.doesNotMatch(appSource, /Math\.random/);
 
   const stylesheet = await fetch(`${appUrl}/styles.css`, { headers: { Cookie: session } });
@@ -278,13 +304,8 @@ test("login validates state, PKCE, and nonce before granting the protected sessi
   assert.equal(stylesheet.headers.get("content-type"), "text/css; charset=utf-8");
   assert.match(await stylesheet.text(), /\.bg-background/);
 
-  const signedIn = await fetch(`${appUrl}/protected`, { headers: { Cookie: session } });
-  assert.equal(signedIn.status, 200);
-  const protectedHtml = await signedIn.text();
-  assert.match(protectedHtml, /alice&lt;&amp;/);
-  assert.equal(signedIn.headers.get("x-frame-options"), "DENY");
-  const csrfToken = protectedHtml.match(/name="csrfToken" value="([A-Za-z0-9_-]+)"/)?.[1];
-  assert.ok(csrfToken);
+  const removedProtectedPage = await fetch(`${appUrl}/protected`, { headers: { Cookie: session }, redirect: "manual" });
+  assert.equal(removedProtectedPage.status, 404);
 
   const authenticatedHealth = await fetch(`${appUrl}/server`, { headers: { Cookie: session } });
   assert.equal(authenticatedHealth.status, 200);
@@ -341,6 +362,115 @@ test("login validates state, PKCE, and nonce before granting the protected sessi
   });
   assert.equal(createPublicKey(privateJwk).export({ format: "jwk" }).x, publicBytes.toString("base64url"));
 
+  const requestKey = async () => {
+    const response = await fetch(`${appUrl}/api/keys`, {
+      method: "POST",
+      headers: { Cookie: session, Origin: appUrl, "Content-Type": "application/json" },
+    });
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  const serverKeys = await requestKey();
+  const clientKeys = await requestKey();
+  const networkPayload = {
+    name: "Integration VPN",
+    server: {
+      interfaceName: "wg-test",
+      address: "10.44.0.1/24",
+      listenPort: 51820,
+      endpoint: "vpn.example.test:51820",
+      dns: "1.1.1.1",
+      ...serverKeys,
+    },
+    peers: [
+      {
+        name: "Test laptop",
+        address: "10.44.0.2/32",
+        ...clientKeys,
+        routeMode: "vpn",
+        customAllowedIPs: "",
+        persistentKeepalive: 25,
+        enabled: true,
+      },
+    ],
+  };
+  const createNetwork = await fetch(`${appUrl}/api/networks`, {
+    method: "POST",
+    headers: { Cookie: session, Origin: appUrl, "Content-Type": "application/json" },
+    body: JSON.stringify(networkPayload),
+  });
+  assert.equal(createNetwork.status, 201);
+  const storedNetwork = await createNetwork.json();
+  assert.equal(storedNetwork.id, "integration-vpn");
+  assert.match(storedNetwork.serverConfig, /AllowedIPs = 10\.44\.0\.2\/32/);
+  assert.match(storedNetwork.peers[0].config, /AllowedIPs = 10\.44\.0\.0\/24/);
+  assert.equal((await stat(join(networksDirectory, "integration-vpn", "server.conf"))).mode & 0o777, 0o600);
+  assert.equal((await stat(join(networksDirectory, "integration-vpn", "peers", "001.conf"))).mode & 0o777, 0o600);
+
+  const updatedNetworkResponse = await fetch(`${appUrl}/api/networks/integration-vpn`, {
+    method: "PUT",
+    headers: { Cookie: session, Origin: appUrl, "Content-Type": "application/json" },
+    body: JSON.stringify({ ...networkPayload, name: "Integration VPN Updated" }),
+  });
+  assert.equal(updatedNetworkResponse.status, 200);
+  assert.equal((await updatedNetworkResponse.json()).id, "integration-vpn");
+
+  const duplicateNetworkResponse = await fetch(`${appUrl}/api/networks`, {
+    method: "POST",
+    headers: { Cookie: session, Origin: appUrl, "Content-Type": "application/json" },
+    body: JSON.stringify({ ...networkPayload, name: "Integration VPN Updated" }),
+  });
+  assert.equal(duplicateNetworkResponse.status, 409);
+
+  const networkList = await fetch(`${appUrl}/api/networks`, { headers: { Cookie: session } });
+  assert.equal(networkList.status, 200);
+  const listedNetworks = await networkList.json();
+  assert.deepEqual(
+    listedNetworks.map(({ id, name }) => ({ id, name })),
+    [{ id: "integration-vpn", name: "Integration VPN Updated" }],
+  );
+  assert.doesNotMatch(JSON.stringify(listedNetworks), /privateKey|serverConfig/);
+
+  const networkDetail = await fetch(`${appUrl}/api/networks/integration-vpn`, { headers: { Cookie: session } });
+  assert.equal(networkDetail.status, 200);
+  assert.equal((await networkDetail.json()).peers[0].privateKey, clientKeys.privateKey);
+
+  const networkValidation = await fetch(`${appUrl}/api/networks/validate`, {
+    method: "POST",
+    headers: { Cookie: session, Origin: appUrl, "Content-Type": "application/json" },
+    body: JSON.stringify(networkPayload),
+  });
+  assert.equal(networkValidation.status, 200);
+  assert.deepEqual(await networkValidation.json(), { valid: true, name: "Integration VPN", peerCount: 1 });
+
+  const importedNetwork = await fetch(`${appUrl}/api/networks/import`, {
+    method: "POST",
+    headers: { Cookie: session, Origin: appUrl, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: "Imported VPN",
+      serverConfig: storedNetwork.serverConfig,
+      peers: [{ name: "Imported laptop", config: storedNetwork.peers[0].config }],
+    }),
+  });
+  assert.equal(importedNetwork.status, 201);
+  assert.equal((await importedNetwork.json()).server.publicKey, serverKeys.publicKey);
+  const storedFile = JSON.parse(await readFile(join(networksDirectory, "integration-vpn", "network.json"), "utf8"));
+  assert.equal(storedFile.server.privateKey, serverKeys.privateKey);
+
+  const badNetwork = await fetch(`${appUrl}/api/networks`, {
+    method: "POST",
+    headers: { Cookie: session, Origin: appUrl, "Content-Type": "application/json" },
+    body: JSON.stringify({ ...networkPayload, server: { ...networkPayload.server, endpoint: "not-an-endpoint" } }),
+  });
+  assert.equal(badNetwork.status, 400);
+  assert.match((await badNetwork.json()).error, /Endpoint/);
+
+  const deleteNetwork = await fetch(`${appUrl}/api/networks/integration-vpn`, {
+    method: "DELETE",
+    headers: { Cookie: session, Origin: appUrl },
+  });
+  assert.equal(deleteNetwork.status, 200);
+
   const logoutWithoutCsrf = await fetch(`${appUrl}/auth/logout`, {
     method: "POST",
     headers: {
@@ -368,6 +498,7 @@ test("login validates state, PKCE, and nonce before granting the protected sessi
   assert.equal(new URL(logout.headers.get("location")).pathname, "/logout");
   assert.match(logout.headers.get("set-cookie"), /Max-Age=0/);
 
-  const signedOut = await fetch(`${appUrl}/protected`, { redirect: "manual" });
-  assert.equal(signedOut.status, 302);
+  const signedOut = await fetch(`${appUrl}/`, { redirect: "manual" });
+  assert.equal(signedOut.status, 200);
+  assert.match(await signedOut.text(), /Sign in to continue/);
 });

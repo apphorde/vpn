@@ -27,7 +27,6 @@
               </div>
             </div>
             <div class="flex w-full items-center justify-between space-x-4 sm:w-auto sm:justify-start">
-              <a href="/protected" class="text-sm underline">Protected area</a>
               <button
                 id="darkModeToggle"
                 class="p-2 rounded-md bg-muted hover:bg-accent hover:text-accent-foreground transition-colors"
@@ -41,6 +40,12 @@
                   ></path>
                 </svg>
               </button>
+              <button
+                id="signOutButton"
+                class="px-3 py-2 rounded-md bg-muted text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors text-sm font-medium"
+              >
+                Sign out
+              </button>
             </div>
           </div>
         </div>
@@ -48,6 +53,98 @@
 
       <!-- Main Content -->
       <main class="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
+        <section class="mb-8 bg-card rounded-lg shadow border border-border p-6">
+          <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+            <div class="grid flex-1 grid-cols-1 gap-4 sm:grid-cols-2">
+              <div>
+                <label for="networkName" class="block text-sm font-medium text-card-foreground mb-2"
+                  >Network name</label
+                >
+                <input
+                  id="networkName"
+                  type="text"
+                  maxlength="80"
+                  class="w-full px-3 py-2 bg-input border border-border rounded-md"
+                  value="New VPN network"
+                />
+              </div>
+              <div>
+                <label for="savedNetworks" class="block text-sm font-medium text-card-foreground mb-2"
+                  >Saved networks</label
+                >
+                <select id="savedNetworks" class="w-full px-3 py-2 bg-input border border-border rounded-md">
+                  <option value="">New network</option>
+                </select>
+              </div>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <button
+                id="newNetwork"
+                class="px-3 py-2 rounded-md bg-muted text-muted-foreground hover:bg-accent hover:text-accent-foreground font-medium"
+              >
+                New
+              </button>
+              <button
+                id="saveNetwork"
+                class="px-3 py-2 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 font-medium"
+              >
+                Save network
+              </button>
+              <button
+                id="deleteNetwork"
+                class="px-3 py-2 rounded-md bg-destructive/10 text-destructive hover:bg-destructive/20 font-medium"
+                disabled
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+          <p class="mt-4 text-sm text-muted-foreground">
+            Saved server and client `.conf` files include private keys and are stored on the app's mounted data volume.
+          </p>
+          <details class="mt-5 border-t border-border pt-4">
+            <summary class="cursor-pointer font-medium text-card-foreground">
+              Import an existing server and client config pair
+            </summary>
+            <p class="mt-2 text-sm text-muted-foreground">
+              Imported files are stored as supplied after validation. Review any PreUp/PostUp/PreDown/PostDown shell
+              hooks before using the configs elsewhere. Editing and saving rebuilds configs from the fields below, so
+              other imported directives are not retained.
+            </p>
+            <div class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div>
+                <label for="serverConfigFile" class="block text-sm font-medium text-card-foreground mb-2"
+                  >Server `.conf`</label
+                >
+                <input
+                  id="serverConfigFile"
+                  type="file"
+                  accept=".conf,text/plain"
+                  class="block w-full text-sm text-muted-foreground"
+                />
+              </div>
+              <div>
+                <label for="clientConfigFiles" class="block text-sm font-medium text-card-foreground mb-2"
+                  >Matching client `.conf` files</label
+                >
+                <input
+                  id="clientConfigFiles"
+                  type="file"
+                  accept=".conf,text/plain"
+                  multiple
+                  class="block w-full text-sm text-muted-foreground"
+                />
+              </div>
+            </div>
+            <button
+              id="importNetwork"
+              class="mt-4 px-4 py-2 rounded-md bg-secondary text-secondary-foreground hover:bg-secondary/90 font-medium"
+            >
+              Validate and import
+            </button>
+          </details>
+        </section>
+
         <!-- Server Configuration Section -->
         <div class="mb-8">
           <div class="bg-card rounded-lg shadow border border-border p-6">
@@ -66,7 +163,7 @@
                 <label class="block text-sm font-medium text-card-foreground mb-2">Private Key</label>
                 <div class="relative">
                   <input
-                    type="text"
+                    type="password"
                     id="serverPrivateKey"
                     class="w-full px-3 py-2 bg-input border border-border rounded-md font-mono text-sm"
                     placeholder="Click 'Generate Keys' to create server keys"
@@ -115,7 +212,7 @@
               </div>
             </div>
 
-            <div class="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div class="mt-6 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
               <div>
                 <label class="block text-sm font-medium text-card-foreground mb-2">Listen Port</label>
                 <input
@@ -143,6 +240,29 @@
                   id="serverIP"
                   class="w-full px-3 py-2 bg-input border border-border rounded-md"
                   value="10.0.0.1/24"
+                  placeholder="10.0.0.1/24, fd42::1/64"
+                />
+              </div>
+              <div>
+                <label for="serverEndpoint" class="block text-sm font-medium text-card-foreground mb-2"
+                  >Public endpoint</label
+                >
+                <input
+                  id="serverEndpoint"
+                  type="text"
+                  class="w-full px-3 py-2 bg-input border border-border rounded-md"
+                  placeholder="vpn.example.com:51820"
+                />
+              </div>
+              <div>
+                <label for="serverDNS" class="block text-sm font-medium text-card-foreground mb-2"
+                  >Client DNS (optional)</label
+                >
+                <input
+                  id="serverDNS"
+                  type="text"
+                  class="w-full px-3 py-2 bg-input border border-border rounded-md"
+                  placeholder="1.1.1.1"
                 />
               </div>
             </div>
@@ -209,6 +329,10 @@
     >
       <span id="toastMessage"></span>
     </div>
+
+    <form id="logoutForm" class="hidden" method="post" action="/auth/logout">
+      <input type="hidden" name="csrfToken" value="__CSRF_TOKEN__" />
+    </form>
 
     <script src="index.js"></script>
   </body>

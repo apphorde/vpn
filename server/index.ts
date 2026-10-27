@@ -1,7 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { createCipheriv, createDecipheriv, createHash, generateKeyPairSync, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import * as oidc from "openid-client";
+import { createNetworkStore, generateKeyPair, generateNetworkConfigs, validatePairedConfigs } from "./networks.mjs";
 
 const cookieName = "vpn_session";
 
@@ -54,18 +55,78 @@ function cookie(response, value, maxAge, secure) {
   );
 }
 
-async function readRequestBody(request) {
+async function readRequestBody(request, maxBytes = 4096) {
   const chunks = [];
   let size = 0;
   for await (const chunk of request) {
     size += chunk.length;
-    if (size > 4096) {
-      throw new Error("Request body is too large");
+    if (size > maxBytes) {
+      throw Object.assign(new Error("request_body_too_large"), { statusCode: 413 });
     }
     chunks.push(chunk);
   }
   return Buffer.concat(chunks).toString("utf8");
 }
+
+function assertJsonContentType(request) {
+  const contentType = request.headers["content-type"];
+  if (typeof contentType !== "string" || contentType.split(";", 1)[0].trim().toLowerCase() !== "application/json") {
+    throw Object.assign(new Error("content_type_must_be_application_json"), { statusCode: 415 });
+  }
+}
+
+async function readJsonBody(request) {
+  assertJsonContentType(request);
+  try {
+    return JSON.parse(await readRequestBody(request, 1024 * 1024));
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      throw Object.assign(new Error("invalid_json"), { statusCode: 400 });
+    }
+    throw error;
+  }
+}
+
+function sendJson(response, status, value, cacheControl = "no-store") {
+  const headers = {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": cacheControl,
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Cross-Origin-Resource-Policy": "same-origin",
+  };
+  if (status === 401) {
+    headers["WWW-Authenticate"] = "OIDC";
+  }
+  response.writeHead(status, headers);
+  response.end(JSON.stringify(value));
+}
+
+const signInLanding = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f4f7f6">
+    <title>Sign in to continue</title>
+    <style>
+      :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+      * { box-sizing: border-box; }
+      body { display: grid; min-height: 100vh; margin: 0; place-items: center; background: #f4f7f6; }
+      a { padding: 0.9rem 1.5rem; border-radius: 0.5rem; background: #263d32; color: #c8e6a8; font-weight: 600; text-decoration: none; }
+      a:hover { background: #1a2a22; }
+      a:focus-visible { outline: 3px solid #376d46; outline-offset: 4px; }
+      @media (prefers-color-scheme: dark) {
+        :root { color-scheme: dark; }
+        body { background: #101713; }
+        a { background: #376d46; color: #e0f4cf; }
+        a:hover { background: #2b4432; }
+        a:focus-visible { outline-color: #c8e6a8; }
+      }
+    </style>
+  </head>
+  <body><main><a href="/auth/login">Sign in to continue</a></main></body>
+</html>`;
 
 async function main() {
   const issuer = process.env.OIDC_ISSUER;
@@ -99,6 +160,7 @@ async function main() {
     readFile("./client/index.js"),
     readFile("./client/styles.css"),
   ]);
+  const networkStore = createNetworkStore(process.env.NETWORKS_DIR ?? "/home/app/data/networks");
 
   const server = createServer(async (request, response) => {
     response.setHeader("X-Content-Type-Options", "nosniff");
@@ -132,12 +194,17 @@ async function main() {
           !["GET", "HEAD"].includes(request.method ?? "GET") ||
           request.headers.accept?.includes("application/json");
         if (isApiRequest) {
-          response.writeHead(401, {
-            "Content-Type": "application/json; charset=utf-8",
+          sendJson(response, 401, { error: "unauthorized", login: "/auth/login" });
+          return;
+        }
+        if (route === "GET /") {
+          response.writeHead(200, {
+            "Content-Type": "text/html; charset=utf-8",
             "Cache-Control": "no-store",
-            "WWW-Authenticate": "OIDC",
+            "Content-Security-Policy":
+              "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
           });
-          response.end(JSON.stringify({ error: "unauthorized", login: "/auth/login" }));
+          response.end(signInLanding);
           return;
         }
         response.writeHead(302, { Location: "/auth/login", "Cache-Control": "no-store" });
@@ -267,32 +334,19 @@ async function main() {
         return;
       }
 
-      if (route === "GET /protected") {
-        if (!session?.user) {
-          response.writeHead(302, { Location: "/auth/login" });
-          response.end();
-          return;
-        }
-        response.writeHead(200, {
-          "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "no-store",
-          "Referrer-Policy": "no-referrer",
-        });
-        response.end(
-          `<main><h1>Protected area</h1><p>Signed in as ${escapeHtml(session.user)}</p><form method="post" action="/auth/logout"><input type="hidden" name="csrfToken" value="${escapeHtml(session.csrfToken ?? "")}"><button>Sign out</button></form><p><a href="/">Return to WireGuard Manager</a></p></main>`,
-        );
-        return;
-      }
-
       switch (route) {
-        case "GET /":
+        case "GET /": {
+          const authenticatedIndex = indexPage
+            .toString()
+            .replace('value="__CSRF_TOKEN__"', `value="${escapeHtml(session.csrfToken ?? "")}"`);
           response.writeHead(200, {
             "Content-Type": "text/html; charset=utf-8",
             "Cache-Control": "no-store",
             "Referrer-Policy": "no-referrer",
           });
-          response.end(indexPage);
+          response.end(authenticatedIndex);
           return;
+        }
         case "GET /index.js":
           response.writeHead(200, {
             "Content-Type": "text/javascript; charset=utf-8",
@@ -316,53 +370,95 @@ async function main() {
           response.end("OK");
           return;
         case "POST /api/keys": {
-          if (request.headers.origin !== appUrl.origin) {
-            response.writeHead(403, {
-              "Content-Type": "application/json; charset=utf-8",
-              "Cache-Control": "no-store",
-              "X-Content-Type-Options": "nosniff",
-            });
-            response.end(JSON.stringify({ error: "same_origin_required" }));
-            return;
-          }
-          const contentType = request.headers["content-type"];
-          if (
-            typeof contentType !== "string" ||
-            contentType.split(";", 1)[0].trim().toLowerCase() !== "application/json"
-          ) {
-            response.writeHead(415, {
-              "Content-Type": "application/json; charset=utf-8",
-              "Cache-Control": "no-store",
-              "X-Content-Type-Options": "nosniff",
-            });
-            response.end(JSON.stringify({ error: "content_type_must_be_application_json" }));
-            return;
-          }
-          const { privateKey, publicKey } = generateKeyPairSync("x25519");
-          const privateJwk = privateKey.export({ format: "jwk" });
-          const publicJwk = publicKey.export({ format: "jwk" });
-          response.writeHead(200, {
-            "Content-Type": "application/json; charset=utf-8",
-            "Cache-Control": "no-store, private",
-            Pragma: "no-cache",
-            "X-Content-Type-Options": "nosniff",
-            "Referrer-Policy": "no-referrer",
-            "Cross-Origin-Resource-Policy": "same-origin",
-          });
-          response.end(
-            JSON.stringify({
-              privateKey: Buffer.from(privateJwk.d, "base64url").toString("base64"),
-              publicKey: Buffer.from(publicJwk.x, "base64url").toString("base64"),
-            }),
-          );
+          assertJsonContentType(request);
+          sendJson(response, 200, generateKeyPair(), "no-store, private");
           return;
         }
         default:
-          response.writeHead(404);
-          response.end();
-          return;
+          break;
       }
+
+      if (route === "GET /api/networks") {
+        sendJson(response, 200, await networkStore.list());
+        return;
+      }
+
+      if (route === "POST /api/networks") {
+        const network = generateNetworkConfigs(await readJsonBody(request));
+        sendJson(response, 201, await networkStore.save(network));
+        return;
+      }
+
+      if (route === "POST /api/networks/validate") {
+        const body = await readJsonBody(request);
+        const network = body.serverConfig ? validatePairedConfigs(body) : generateNetworkConfigs(body);
+        sendJson(response, 200, { valid: true, name: network.name, peerCount: network.peers.length });
+        return;
+      }
+
+      if (route === "POST /api/networks/import") {
+        const network = validatePairedConfigs(await readJsonBody(request));
+        sendJson(response, 201, await networkStore.save(network));
+        return;
+      }
+
+      const networkDetailMatch = route.match(/^GET \/api\/networks\/([a-z0-9]+(?:-[a-z0-9]+)*)$/);
+      if (networkDetailMatch) {
+        try {
+          sendJson(response, 200, await networkStore.get(networkDetailMatch[1]));
+        } catch (error) {
+          if (error?.code === "ENOENT") {
+            sendJson(response, 404, { error: "network_not_found" });
+            return;
+          }
+          throw error;
+        }
+        return;
+      }
+
+      const networkUpdateMatch = route.match(/^PUT \/api\/networks\/([a-z0-9]+(?:-[a-z0-9]+)*)$/);
+      if (networkUpdateMatch) {
+        const network = generateNetworkConfigs(await readJsonBody(request));
+        try {
+          sendJson(response, 200, await networkStore.save(network, networkUpdateMatch[1]));
+        } catch (error) {
+          if (error?.code === "ENOENT") {
+            sendJson(response, 404, { error: "network_not_found" });
+            return;
+          }
+          throw error;
+        }
+        return;
+      }
+
+      const networkDeleteMatch = route.match(/^DELETE \/api\/networks\/([a-z0-9]+(?:-[a-z0-9]+)*)$/);
+      if (networkDeleteMatch) {
+        try {
+          await networkStore.remove(networkDeleteMatch[1]);
+        } catch (error) {
+          if (error?.code === "ENOENT") {
+            sendJson(response, 404, { error: "network_not_found" });
+            return;
+          }
+          throw error;
+        }
+        sendJson(response, 200, { deleted: true });
+        return;
+      }
+      response.writeHead(404, { "Cache-Control": "no-store" });
+      response.end();
     } catch (error) {
+      const requestPath = (request.url ?? "/").split("?", 1)[0];
+      if (requestPath === "/api" || requestPath.startsWith("/api/")) {
+        const statusCode = error?.statusCode ?? (error?.code ? 500 : 400);
+        if (statusCode >= 500) {
+          console.error("API request failed", error?.code ?? "unknown error");
+        }
+        sendJson(response, statusCode, {
+          error: statusCode >= 500 ? "internal_error" : (error?.message ?? "request_failed"),
+        });
+        return;
+      }
       console.error("Request failed", error instanceof Error ? error.message : "unknown error");
       response.writeHead(400, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
       response.end("Authentication request failed");
